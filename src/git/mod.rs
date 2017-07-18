@@ -1,5 +1,6 @@
 //! Git interface
 
+extern crate serde_json;
 use self::super::{Github, Result};
 
 /// reference to git operations associated with a github repo
@@ -62,6 +63,44 @@ impl<'a> Git<'a> {
         self.github.get::<GetReferenceResponse>(
             &self.path(format!("/refs/{}", reference.into())),
         )
+    }
+
+    /// Provides access to git commit operations associated with a github repo
+    pub fn commits(&self) -> Commits {
+        Commits::new(self.github, self.owner.as_str(), self.repo.as_str())
+    }
+}
+
+/// Provides access to git commit operations associated with a github repo
+/// Typically accessed via `github.repo(..., ...).git().commits()`
+pub struct Commits<'a> {
+    github: &'a Github,
+    owner: String,
+    repo: String,
+}
+
+impl<'a> Commits<'a> {
+    #[doc(hidden)]
+    pub fn new<O, R>(github: &'a Github, owner: O, repo: R) -> Self
+    where
+        O: Into<String>,
+        R: Into<String>,
+    {
+        Commits {
+            github: github,
+            owner: owner.into(),
+            repo: repo.into(),
+        }
+    }
+
+    /// Create a commit: https://developer.github.com/v3/git/commits/#create-a-commit
+    pub fn create(&self, commit: &CommitOptions) -> Result<Commit> {
+        let data = serde_json::to_string(&commit)?;
+        self.github.post::<Commit>(&self.path(""), data.as_bytes())
+    }
+
+    fn path(&self, more: &str) -> String {
+        format!("/repos/{}/{}/git/commits{}", self.owner, self.repo, more)
     }
 }
 
@@ -129,18 +168,138 @@ pub struct Object {
     pub url: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Commit {
+    pub sha: String,
+    pub url: String,
+    pub author: Signature,
+    pub committer: Signature,
+    pub message: String,
+    pub tree: ObjectRef,
+    pub parents: Vec<ObjectRef>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
+pub struct Signature {
+    pub name: String,
+    pub email: String,
+    pub date: String,
+}
+
+impl Signature {
+    pub fn new<N, E, D>(name: N, email: E, date: D) -> Self
+    where
+        N: Into<String>,
+        E: Into<String>,
+        D: Into<String>,
+    {
+        Signature {
+            name: name.into(),
+            email: email.into(),
+            date: date.into(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ObjectRef {
+    pub url: String,
+    pub sha: String,
+}
+
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub struct CommitOptions {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<Signature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub committer: Option<Signature>,
+    pub parents: Vec<String>,
+    pub tree: String,
+}
+
+impl CommitOptions {
+    pub fn builder<M, T, P>(message: M, tree: T, parents: Vec<P>) -> CommitOptionsBuilder
+    where
+        M: Into<String>,
+        T: Into<String>,
+        P: Into<String>,
+    {
+        CommitOptionsBuilder::new(message, tree, parents)
+    }
+}
+
+pub struct CommitOptionsBuilder(CommitOptions);
+
+impl CommitOptionsBuilder {
+    #[doc(hidden)]
+    pub fn new<M, T, P>(message: M, tree: T, parents: Vec<P>) -> CommitOptionsBuilder
+    where
+        M: Into<String>,
+        T: Into<String>,
+        P: Into<String>,
+    {
+        CommitOptionsBuilder(CommitOptions {
+            message: message.into(),
+            tree: tree.into(),
+            parents: parents
+                .into_iter()
+                .map(|c| c.into())
+                .collect::<Vec<String>>(),
+            ..Default::default()
+        })
+    }
+
+    pub fn committer<N, E, D>(&mut self, name: N, email: E, date: D) -> &mut Self
+    where
+        N: Into<String>,
+        E: Into<String>,
+        D: Into<String>,
+    {
+        self.0.committer = Some(Signature::new(name, email, date));
+        self
+    }
+
+    pub fn author<N, E, D>(&mut self, name: N, email: E, date: D) -> &mut Self
+    where
+        N: Into<String>,
+        E: Into<String>,
+        D: Into<String>,
+    {
+        self.0.author = Some(Signature::new(name, email, date));
+        self
+    }
+
+    pub fn build(&self) -> CommitOptions {
+        CommitOptions {
+            message: self.0.message.clone(),
+            tree: self.0.tree.clone(),
+            parents: self.0.parents.clone(),
+            committer: self.0.committer.clone(),
+            author: self.0.author.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
-    use serde::Deserialize;
-    use serde_json;
+    use serde::{Deserialize, Serialize};
     use super::*;
 
     fn test_deserializing<'de, T>(payload: &'static str, expected: T)
     where
-        T:  Debug + PartialEq + Deserialize<'de>,
+        T: Debug + PartialEq + Deserialize<'de>,
     {
         let incoming: T = serde_json::from_str(payload).unwrap();
+        assert_eq!(incoming, expected)
+    }
+
+    fn test_serializing<T>(original: T, expected: &'static str)
+    where
+        T: PartialEq + Serialize,
+    {
+        let incoming = serde_json::to_string(&original).unwrap();
         assert_eq!(incoming, expected)
     }
 
@@ -210,5 +369,35 @@ mod tests {
             },
         ]);
         test_deserializing(payload, expected)
+    }
+
+    #[test]
+    fn serialize_create_a_commit() {
+        let original = CommitOptions::builder(
+            "my commit message",
+            "827efc6d56897b048c772eb4087f854f46256132",
+            vec!["7d1b31e74ee336d15cbd21741bc88a537ed063a0"],
+        ).author(
+            "Scott Chacon",
+            "schacon@gmail.com",
+            "2008-07-09T16:13:30+12:00",
+        )
+            .build();
+        let expected =
+            concat!(
+            "{",
+            r#""message":"my commit message","#,
+            r#""author":{"#,
+            r#""name":"Scott Chacon","#,
+            r#""email":"schacon@gmail.com","#,
+            r#""date":"2008-07-09T16:13:30+12:00""#,
+            "},",
+            r#""parents":["#,
+            r#""7d1b31e74ee336d15cbd21741bc88a537ed063a0""#,
+            "],",
+            r#""tree":"827efc6d56897b048c772eb4087f854f46256132""#,
+            "}",
+        );
+        test_serializing(original, expected)
     }
 }
