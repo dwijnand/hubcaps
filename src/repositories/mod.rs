@@ -377,6 +377,11 @@ impl<C: Clone + Connect + 'static> Repository<C> {
         self.github.post(&self.path(""), json!(options))
     }
 
+    /// https://developer.github.com/v3/repos/#delete-a-repository
+    pub fn delete(&self) -> Future<()> {
+        self.github.delete(&self.path(""))
+    }
+
     /// get a reference to branch operations
     pub fn branches(&self) -> Branches<C> {
         Branches::new(self.github.clone(), self.owner.as_str(), self.repo.as_str())
@@ -1036,7 +1041,7 @@ impl UserRepoListOptionsBuilder {
         self
     }
 
-    pub fn sort(&mut self, sort: Type) -> &mut Self {
+    pub fn sort(&mut self, sort: Sort) -> &mut Self {
         self.0.params.insert("sort", sort.to_string());
         self
     }
